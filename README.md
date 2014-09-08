@@ -20,3 +20,6 @@ make compute-accuracy
 training data text8 can be downloaded from: http://pan.baidu.com/s/1i3eLKbF
 ###############
 questions:luoqun9191@163.com
+
+-------------------------
+more details about word2vec：http://code.google.com/p/word2vec/
