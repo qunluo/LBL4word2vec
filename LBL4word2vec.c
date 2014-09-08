@@ -29,7 +29,7 @@ struct vocab_word *vocab;
 int binary = 0, cbow = 0, debug_mode = 2, window = 5, min_count = 5, num_threads = 1, min_reduce = 1;
 int *vocab_hash;
 long long vocab_max_size = 1000, vocab_size = 0, layer1_size = 100;
-long long train_words = 0, word_count_actual = 0, file_size = 0, classes = 0;
+long long train_words = 0, word_count_actual = 0, file_size = 0, classes = 0, iter = 5;
 real alpha = 0.025, starting_alpha, sample = 0;
 real *syn0, *syn1nce, *expTable;
 clock_t start;
@@ -159,7 +159,7 @@ void SortVocab()
     for (a = 0; a < size; a++)
     {
         // Words occuring less than min_count times will be discarded from the vocab
-        if (vocab[a].cn < min_count)
+        if (a > 0 && vocab[a].cn < min_count)
         {
             vocab_size--;
             free(vocab[vocab_size].word);
@@ -299,7 +299,7 @@ void InitNet()
     printf("init begin\n");
     fflush(stdout);
     long long a, b;
-    a = posix_memalign((void **)&syn0, 128, (long long)vocab_size * layer1_size * sizeof(real));
+    a = posix_memalign((void **)&syn0, 128, (long long)(vocab_size + 1) * layer1_size * sizeof(real));
     if (syn0 == NULL) {printf("Memory allocation failed\n"); exit(1);}
     if (nce > 0)
     {
@@ -307,7 +307,7 @@ void InitNet()
         if (syn1nce == NULL) {printf("Memory allocation failed\n"); exit(1);}
         for (b = 0; b < layer1_size; b++)
             for (a = 0; a < 2 * window + 1; a++)
-                syn1nce[a * layer1_size + b] = 1;
+                syn1nce[a * layer1_size + b] = 1.0;
     }
     for (b = 0; b < layer1_size; b++)
         for (a = 0; a < vocab_size; a++)
@@ -320,7 +320,7 @@ void *TrainModelThread(void *id)
 {
     long long a, b, d, word, last_word, sentence_length = 0, sentence_position = 0;
     long long word_count = 0, last_word_count = 0, sen[MAX_SENTENCE_LENGTH + 1];
-    long long l1, l2, c, target, label;
+    long long l1, l2, c, target, label, local_iter = iter;
     unsigned long long next_random = (long long)id;
     real f, g;
     clock_t now;
@@ -338,11 +338,11 @@ void *TrainModelThread(void *id)
         {
             now=clock();
             printf("%cAlpha: %f  Progress: %.2f%%  Words/thread/sec: %.2fk  ", 13, alpha,
-            word_count_actual / (real)(train_words + 1) * 100,
+            word_count_actual / (real)(iter * train_words + 1) * 100,
             word_count_actual / ((real)(now - start + 1) / (real)CLOCKS_PER_SEC * 1000));
             fflush(stdout);
         }
-        alpha = starting_alpha * (1 - word_count_actual / (real)(train_words + 1));
+        alpha = starting_alpha * (1 - word_count_actual / (real)(iter * train_words + 1));
         if (alpha < starting_alpha * 0.0001) alpha = starting_alpha * 0.0001;
         }
         if (sentence_length == 0)
@@ -367,8 +367,17 @@ void *TrainModelThread(void *id)
             }
             sentence_position = 0;
         }
-        if (feof(fi)) break;
-        if (word_count > train_words / num_threads) break;
+        if (feof(fi) || (word_count > train_words / num_threads)) 
+        {
+            word_count_actual += word_count - last_word_count;
+            local_iter--;
+            if (local_iter == 0) break;
+            word_count = 0;
+            last_word_count = 0;
+            sentence_length = 0;
+            fseek(fi, file_size / (long long)num_threads * (long long)id, SEEK_SET);
+            continue;
+        }
         word = sen[sentence_position];
         if (word == -1) continue;
         for (c = 0; c < layer1_size; c++) neu1[c] = 0;
@@ -404,11 +413,12 @@ void *TrainModelThread(void *id)
                         if (target == word) continue;
                         label = 0;
                     }
+
                     l2 = target * layer1_size;
                     f = 0;
                     for (c = 0; c < layer1_size; c++) f += neu1[c] * syn0[c + l2];
-                    if (f > MAX_EXP) g = (label - 1) * alpha;
-                    else if (f < -MAX_EXP) g = (label - 0) * alpha;
+                    if (f > MAX_EXP - 0.1) g = (label - 1) * alpha;
+                    else if (f < -MAX_EXP + 0.1) g = (label - 0) * alpha;
                     else g = (label - expTable[(int)((f + MAX_EXP) * (EXP_TABLE_SIZE / MAX_EXP / 2))]) * alpha;
                     for (c = 0; c < layer1_size; c++) neu1e[c] += g * syn0[c + l2];
                     for (c = 0; c < layer1_size; c++) syn0[c + l2] += g * neu1[c];
@@ -636,6 +646,8 @@ int main(int argc, char **argv)
         printf("\t\tUse the continuous bag of words model; default is 1\n");
         printf("\t-nce <int>\n");
         printf("\t\tNumber of noise examples; default is 10, common values are 5 - 25\n");
+        printf("\t-iter <int>\n");
+        printf("\t\tRun more training iterations (default 5)\n");
         printf("\nExamples:\n");
         printf("time ./word2vec -train text8 -output vectors.bin -cbow 1 -size 200 -window 5 -nce 10 -sample 1e-3 -threads 12 -binary 1\n");
         return 0;
@@ -658,6 +670,7 @@ int main(int argc, char **argv)
     if ((i = ArgPos((char *)"-min-count", argc, argv)) > 0) min_count = atoi(argv[i + 1]);
     if ((i = ArgPos((char *)"-classes", argc, argv)) > 0) classes = atoi(argv[i + 1]);
     if ((i = ArgPos((char *)"-nce", argc, argv)) > 0) nce = atoi(argv[i + 1]);
+    if ((i = ArgPos((char *)"-iter", argc, argv)) > 0) iter = atoi(argv[i + 1]);
     vocab = (struct vocab_word *)calloc(vocab_max_size, sizeof(struct vocab_word));
     vocab_hash = (int *)calloc(vocab_hash_size, sizeof(int));
     expTable = (real *)malloc((EXP_TABLE_SIZE + 1) * sizeof(real));
